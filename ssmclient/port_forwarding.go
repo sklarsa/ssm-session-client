@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -83,7 +84,18 @@ func startPortForwardingSession(ctx context.Context, c *datachannel.SsmDataChann
 	if err != nil {
 		return err
 	}
-	defer lsnr.Close()
+
+	closeFunc := &sync.Once{}
+	closeLsnr := func() {
+		closeFunc.Do(func() { _ = lsnr.Close() })
+	}
+	defer closeLsnr()
+
+	go func() {
+		<-ctx.Done()
+		lsnr.Close()
+	}()
+
 	log.Printf("listening on %s", lsnr.Addr())
 
 	doneCh := make(chan bool)
@@ -119,7 +131,7 @@ outer:
 			case data, ok := <-inCh:
 				if !ok {
 					// incoming websocket channel is closed, which is fatal
-					_ = conn.Close()
+					closeLsnr()
 					break outer
 				}
 
@@ -131,7 +143,7 @@ outer:
 					// I can't think of a good reason why we'd ever end up here, but if we do
 					// we should stop the world
 					log.Print("errCh closed")
-					_ = conn.Close()
+					closeLsnr()
 					break outer
 				}
 
@@ -139,12 +151,12 @@ outer:
 				log.Print(er)
 				break inner
 			case <-ctx.Done():
-				_ = conn.Close()
+				closeLsnr()
 				break outer
 			}
 		}
 
-		_ = conn.Close()
+		closeLsnr()
 	}
 	return nil
 }
