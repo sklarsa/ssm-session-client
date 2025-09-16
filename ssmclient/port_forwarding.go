@@ -1,6 +1,7 @@
 package ssmclient
 
 import (
+	"context"
 	"io"
 	"log"
 	"net"
@@ -30,7 +31,24 @@ type PortForwardingInput struct {
 // configure the session.  The aws.Config parameter will be used to call the AWS SSM StartSession
 // API, which is used as part of establishing the websocket communication channel.
 //
-//nolint:funlen,gocognit // it's long, but not overly hard to read despite what the gocognit says
+// The context's cancellation function is used to close the port forwarding session.
+func PortForwardingSessionWithContext(ctx context.Context, cfg aws.Config, opts *PortForwardingInput) error {
+	c, err := openDataChannel(cfg, opts)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// Both the basic and muxing plugins support TerminateSession on the agent side.
+		_ = c.TerminateSession()
+		_ = c.Close()
+	}()
+
+	return startPortForwardingSession(ctx, c, opts)
+}
+
+// PortForwardingSession starts a port forwarding session using the PortForwardingInput parameters to
+// configure the session.  The aws.Config parameter will be used to call the AWS SSM StartSession
+// API, which is used as part of establishing the websocket communication channel.
 func PortForwardingSession(cfg aws.Config, opts *PortForwardingInput) error {
 	c, err := openDataChannel(cfg, opts)
 	if err != nil {
@@ -48,7 +66,16 @@ func PortForwardingSession(cfg aws.Config, opts *PortForwardingInput) error {
 	// possibility that the data channel is still valid
 	installSignalHandler(c)
 
-	if err = c.WaitForHandshakeComplete(); err != nil {
+	return startPortForwardingSession(context.Background(), c, opts)
+}
+
+// startPortForwardingSession is shared by PortForwardingSession and PortForwardingSessionWithContext
+// and handles the main port forwarding session loop.
+//
+//nolint:funlen,gocognit // it's long, but not overly hard to read despite what the gocognit says
+func startPortForwardingSession(ctx context.Context, c *datachannel.SsmDataChannel, opts *PortForwardingInput) error {
+
+	if err := c.WaitForHandshakeComplete(ctx); err != nil {
 		return err
 	}
 
@@ -111,6 +138,9 @@ outer:
 				// any write to errCh means at least 1 of the goroutines has exited
 				log.Print(er)
 				break inner
+			case <-ctx.Done():
+				_ = conn.Close()
+				break outer
 			}
 		}
 
