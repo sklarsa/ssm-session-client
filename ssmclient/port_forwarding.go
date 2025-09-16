@@ -107,9 +107,13 @@ outer:
 		var conn net.Conn
 		conn, err = lsnr.Accept()
 		if err != nil {
-			// not fatal, just wait for next (maybe unless lsnr is dead?)
-			log.Print(err)
-			continue
+			select {
+			case <-ctx.Done():
+				break outer // Expected error due to shutdown
+			default:
+				log.Print(err)
+				continue
+			}
 		}
 
 		go func() {
